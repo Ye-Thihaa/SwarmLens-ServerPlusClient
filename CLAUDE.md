@@ -612,6 +612,15 @@ same paths the demo cluster uses):
   a peer instead of 404ing; the blob reaches all 3 nodes on `blob_sync`'s
   own path within 25s; identical bytes dedup to one blob; and a
   legacy inline-base64 row written straight into the DB still serves.
+- `python demo_preflight.py` — not a test of the code, a check of the
+  *machine* before presenting: model cache present, exactly one OpenCV
+  distribution with a working `cv2.saliency`, the dev cert unexpired and
+  covering this machine's current LAN IP (the one thing that changes by
+  itself when you connect to a venue's Wi-Fi), `client-2/.env` populated,
+  all 3 nodes answering with identical digests and one agreed Raft leader,
+  no leftover chaos partitions, and every guest/console route rendering.
+  Read-only — safe against the live demo cluster, unlike the `test_*.py`
+  scripts, which delete `node*.db`.
 - `python load_test.py [--quick]` — not a pass/fail test, a measurement
   script. Spins up and tears down its own real clusters, fires real
   concurrent traffic, reports p50/p95/p99 latency, convergence time,
@@ -811,6 +820,26 @@ move it.
   reach a real Supabase in production) -- its trust setting is
   controlled by `CLOUD_SYNC_TRUST_ENV` instead, which `test_cloud_sync.py`
   flips to `false` only because its "cloud" is a local fake server.
+- **Two OpenCV distributions in one environment silently disable
+  `cv2.saliency`, and `import cv2` still succeeds.** `opencv-python` and
+  `opencv-contrib-python*` unpack into the *same* `cv2` package directory,
+  so installing both leaves whichever resolves first in charge — here a
+  stray `opencv-python 4.14` (pulled in as a dependency of an unrelated
+  package in the same interpreter, `ultralytics`, which this project does
+  not use) shadowed the pinned `opencv-contrib-python-headless 5.0.0.93`.
+  `cv2.saliency` still *exists* as an attribute, so nothing fails at
+  import; `StaticSaliencySpectralResidual_create` is simply absent, and
+  `POST /analyze/preview` 400s. Crucially it only 400s for frames where
+  YuNet finds **no face** and `find_subject` falls back to saliency — so
+  a phone pointed at a person works and the same phone pointed at the
+  room doesn't, which reads as a flaky AI rather than a missing module.
+  Fix is a clean swap, not an add: uninstall *every* `opencv-*` variant
+  (uninstalling just one corrupts the shared directory and leaves the
+  survivor unimportable — confirmed: `module 'cv2' has no attribute
+  '__version__'`), then install the pinned one alone. Note `mediapipe`
+  declares a dependency on non-headless `opencv-contrib-python`, so a
+  later `pip install -r requirements.txt` can reintroduce a second
+  distribution; `demo_preflight.py` asserts exactly one is installed.
 - **A test script that spins up its own nodes will silently attach to
   already-running ones on the same ports instead of erroring.**
   `test_vclock.py` (and likely the other `test_*.py` scripts) hardcode
