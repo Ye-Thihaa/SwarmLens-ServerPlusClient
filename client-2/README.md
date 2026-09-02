@@ -1,25 +1,70 @@
-# Swarm Lens
+# client-2 — guest app + operator console
 
-i gave you all the layout ideas i want with all the screenshots
-Act as the design lead for SwarmLens, a distributed-systems class project that disguises itself as a live-event photography app. The real subject: 200 phones at a wedding or festival independently forming an opinion about which corner of the room is beautiful right now, gossiping that opinion to each other over bad Wi-Fi, and visibly disagreeing until they converge. The photography layer (film stocks, composition scoring) is real but it is the skin, not the organ. This is TWO SEPARATE APPS sharing one visual family, not one app with a role switch: APP A — Guest App, used by ~200 people on their own phones, one-handed, mid-event, often in low light. Never shows system internals. APP B — Operator Console, used by ONE person on a laptop feeding the room's main display during an 8-minute demo. Never shows a camera. Do not default to cream+serif+terracotta, near-black+neon-accent, or broadsheet-with-hairlines — pick a direction that comes from THIS subject: analog film culture (contact sheets, light leaks, exposure index, grain) collided with distributed-systems texture (mesh diagrams, signal strength, propagation, quorum, drift). Consider what it would look like if a photo lab's contact-sheet aesthetic and a network topology map were designed by the same person. STEP 1 — Token system (produce this first, use it for everything after): - Color: 4-6 named hex values, justified by the subject — name them for what they mean here (e.g. a color for "converged" vs "diverging" state), not "primary/accent" - Type: a characterful display face + a body face + a mono/utility face for node IDs, timestamps, vector clocks — used sparingly but really used - Layout: one core layout idea for how "many independent things forming one picture" is expressed structurally, with an ASCII wireframe - Signature element: one recurring visual motif that appears in both apps so they read as one product family despite being built and shipped separately Critique this before moving on: would it look distinctive if you'd never seen the brief, or is it your default answer for "photo app" or "dashboard"? Revise until it's specific to SwarmLens. STEP 2 — APP A, Screen 1: Landing page. Shows the "available concepts" — live/upcoming events currently running SwarmLens — as things you enter, not things you read about. Each event card can carry a little real signal (guest count, live vs archived) without becoming a dashboard. If arriving via a venue's QR code, it should feel like walking through a door already labeled with that event's name. Include a one-beat plain-spoken explainer for first-timers — not a carousel. Use real event names, not "Event 1 / Event 2." STEP 3 — APP A, Screen 2: Capture screen. The composition guidance (framing, exposure hint, film-stock suggestion) reads as a photography tool, not an ML product — no confidence scores, no "AI-powered" language. The film-stock/effects picker behaves like a camera's control ring or a strip of physical filters flicked through live over the viewfinder, sitting ON the feed, not a settings menu. When offline, the app just quietly works, with a specific (not generic "offline") signal that photos are queued. Add one more layer: the camera can receive a live cue from the venue heatmap (Step 5) — a soft framing guide or a "turn toward the window" nudge when standing somewhere the crowd already rated highly. This reads as an instinct the camera has, never a popup or a number, and disappears the instant the guest starts composing their own shot — this is the emotional payoff of the whole distributed system for the guest, so give it real restraint. Mobile- first, real content, respects reduced motion. STEP 4 — APP A, Screen 3: Personal gallery strip. The guest's own shots, queued/syncing state made visible with a tactile, specific sense of "your photo just joined a shared picture of this room" — no network diagram. STEP 5 — APP A, Screen 4: Event gallery, with three groupings that feel like different things, not three copies of one grid: (a) By person — each guest who's shot photos gets their own collection (own section, name/handle, count) — a set of small galleries, not one merged feed. (b) Most popular — ranked by a CRDT like-count (a like given offline is never silently lost); the ranking can visibly shift as reconciliation happens — show that, don't smooth it over. (c) Venue heatmap — which corners of the room the crowd has collectively decided are beautiful, computed from merged aesthetic scores. A photo from 40 minutes ago, offline the whole time, can suddenly arrive and shift the map — let that feel like a small event. Near-simultaneous photos from different people are genuinely concurrent, not first/second — don't force a false order on them. Include a photo detail view and an honestly-voiced empty/early-event state (the map before it has enough data to have an opinion — a real state, not a spinner). One signature visual for "this data is still settling," legible to a guest who's never heard the word "quorum." STEP 6 — APP B: Operator Console. Separate application, one operator, feeding the room's main display during the demo — no camera, no shutter, nothing guest-facing. Shows room info as live system state: guest count, photos landed, current leading spot, gossip convergence, Raft leader/term, quorum settings (W/R/N) — the operator's view of the same emergent picture the guest gallery shows, reframed as state, not browsing. Alongside it, a chaos panel: kill a node, partition the cluster, flip W/R live. Audience is an examiner and classmates watching a screen from across a room — failure moments (node dying, leader re-election, partition healing, a heatmap read going stale under W=1, R=1 and correcting itself) must be unambiguous within one second, and be the visual highlight, not a log line. Real distributed-systems vocabulary belongs here (node IDs, terms, W/R/N) but it should still look designed, not like Grafana's defaults. One signature element that makes "this cluster just reached agreement" visually satisfying — the emotional payoff of the whole presentation, so give it real restraint. Build App A and App B as genuinely separate — different auth (or none, for guests), different deploy target, different device assumptions. Do not let the shared design system become a shared codebase with a role flag; that's how a chaos-kill button ends up one tap from a guest's shutter. Before finishing, take a critical pass on every screen: does any part of this look like a generic template you'd produce for "photo app" or "dashboard" on any brief, or does it feel specific to 200 phones arguing their way to agreement about a room?
+Two separate applications that share one design system and nothing else:
+no shared components, no shared data, no role flag. The only thing in
+common is `src/styles.css`'s tokens.
 
-This project was built with [Lovable](https://lovable.dev).
+- **Guest app** — used by many people on their own phones, one-handed,
+  mid-event, often in low light. Real camera, offline outbox, live AI
+  composition guidance, gallery, likes, public wall, end-of-event recap.
+  Never shows system internals.
+- **Operator console** (`/console`) — one person on a laptop feeding the
+  room's display. Live Raft/gossip state, a node graph, hosted-event
+  administration with printable QR cards, quorum reads, and chaos
+  controls. Never shows a camera.
 
-## Build with Lovable
+Both talk to the real three-node cluster in the repo root. There is no
+mock data anywhere.
 
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/85f64867-edcc-41fe-ad48-aad0ffc0ee23).
+## Run it
 
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
-
-## Development
-
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
+The backend must already be running (see the repo root's README).
 
 ```sh
-git clone <this-repository-url>
-cd <repository-name>
-npm i
-npm run dev
+npm install
+npm run dev -- --host
 ```
+
+Defaults to `:8080`, but Vite silently moves to the next free port if
+that one is taken — read the real port off the terminal output. `--host`
+is what makes it reachable from a phone on the same network.
+
+## Configuration
+
+`client-2/.env` (gitignored; `.env.example` documents the shape):
+
+| Key | Purpose |
+|---|---|
+| `CONSOLE_PASSWORD` | Password for the `/console` gate. Verified server-side; the route's loader checks it on every request, so an unauthenticated visitor's HTML never contains console data. |
+| `OPERATOR_TOKEN` | Sent as `X-Operator-Token` on operator-gated backend calls. Read from `process.env` inside server functions, so it never reaches client JS. Must match the backend nodes' own `OPERATOR_TOKEN` if they set one. |
+| `VITE_NODE_URLS` | Where the guest app looks for nodes. Unset means the absolute `127.0.0.1:8001-8003` URLs. Set to `/n1,/n2,/n3` when testing on a phone (see below). |
+
+## Testing on a real phone
+
+Three separate things have to be true, and each fails silently on its own:
+
+1. `getUserMedia` needs a **secure context**, and only `localhost` is
+   exempt — so over plain HTTP the app loads fine on a phone and simply
+   has no camera. `vite.config.ts` enables HTTPS when `certs/dev-key.pem`
+   and `certs/dev-cert.pem` exist (gitignored; generate them with the
+   `openssl` command in that file's comments). The LAN IP must be in the
+   cert's `subjectAltName` — browsers stopped honouring CN for host
+   matching years ago.
+2. An HTTPS page may not fetch `http://` URLs (mixed content).
+3. `127.0.0.1` means *the phone* when the page is running on a phone.
+
+The `/n1,/n2,/n3` proxy in `vite.config.ts` solves 2 and 3 together by
+keeping the browser on one origin it already trusts. Point the guest app
+at it with `VITE_NODE_URLS=/n1,/n2,/n3`. The console is deliberately
+unaffected: it reads absolute cluster URLs, because `/chaos/partition`
+indexes positionally into a specific node's own peer list.
+
+## Where the real documentation is
+
+This directory is one half of a distributed-systems project. The design,
+the phase-by-phase build log, the endpoint reference and the accumulated
+gotchas all live in the repo root:
+
+- `../CLAUDE.md` — working notes, conventions, and every gotcha hit so far
+- `../ROADMAP.md` — full design and phase-by-phase writeup
+- `../README.md` — endpoint list and manual demo commands
