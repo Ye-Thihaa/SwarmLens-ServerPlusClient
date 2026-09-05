@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { NodeState } from "@/operator/cluster";
 import { NetworkGraph } from "@/operator/NetworkGraph";
+import { SplitBrain } from "@/operator/SplitBrain";
 import {
   CLUSTER,
   URL_TO_ID,
@@ -595,6 +596,8 @@ function Console() {
               );
             })}
           </section>
+
+          <SplitBrain eventId={selectedEventId} />
 
           <section className="grid gap-10 border-b border-border py-8 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] xl:gap-16">
             <div className="min-w-0">
