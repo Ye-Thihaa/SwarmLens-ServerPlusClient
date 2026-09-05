@@ -177,7 +177,11 @@ function EventGallery() {
     [photos],
   );
 
-  const maxEngagement = Math.max(1, ...zones.map((z) => z.likes * 2 + z.photos));
+  // Scale the bars off the server's own popular_score rather than
+  // recomputing a second formula here -- the list arrives already sorted by
+  // it, and a locally-invented number would eventually disagree with that
+  // order, which reads as the heatmap being wrong rather than the client.
+  const maxEngagement = Math.max(1, ...zones.map((z) => z.popular_score));
 
   async function like(photoId: string) {
     addLike({
@@ -446,19 +450,31 @@ function EventGallery() {
             </p>
           ) : (
             <ul className="mt-5 space-y-2.5">
-              {zones.map((z) => {
+              {zones.map((z, i) => {
                 const settling = z.photos <= 1;
-                const engagement = z.likes * 2 + z.photos;
+                const engagement = z.popular_score;
+                // Only the leader, and only once it means something: a badge
+                // on the sole zone, or on one guest standing alone, would be
+                // claiming a crowd that isn't there.
+                const popular = i === 0 && z.guests > 1 && zones.length > 1;
                 return (
                   <li
                     key={z.zone}
-                    className={`rounded-sm border border-border bg-card p-3 ${settling ? "settling" : ""} ${z.stale ? "border-safelight/50" : ""}`}
+                    className={`rounded-sm border bg-card p-3 ${settling ? "settling" : ""} ${
+                      popular ? "border-drifting/60" : z.stale ? "border-safelight/50" : "border-border"
+                    }`}
                   >
                     <div className="flex items-center justify-between gap-3">
                       <p className="min-w-0 truncate text-sm font-semibold capitalize">
                         {prettyZone(z.zone)}
                       </p>
-                      <PerfRail acks={z.photos > 6 ? 5 : z.photos > 2 ? 3 : 1} />
+                      {popular ? (
+                        <span className="shrink-0 rounded-sm border border-drifting px-1.5 py-0.5 font-mono text-[0.55rem] tracking-widest text-drifting">
+                          POPULAR SPOT
+                        </span>
+                      ) : (
+                        <PerfRail acks={z.photos > 6 ? 5 : z.photos > 2 ? 3 : 1} />
+                      )}
                     </div>
                     {z.photos === 0 ? (
                       <p className="mt-2 font-mono text-[0.62rem] tracking-widest text-stale">
@@ -476,7 +492,8 @@ function EventGallery() {
                           />
                         </div>
                         <p className="mt-1.5 font-mono text-[0.6rem] tracking-widest text-fixer-dim">
-                          {z.photos} FRAME{z.photos === 1 ? "" : "S"} · {z.likes} LIKE
+                          {z.guests} {z.guests === 1 ? "PERSON" : "PEOPLE"} · {z.photos} FRAME
+                          {z.photos === 1 ? "" : "S"} · {z.likes} LIKE
                           {z.likes === 1 ? "" : "S"} ·{" "}
                           {z.avg_aesthetic != null
                             ? `AESTHETIC ${z.avg_aesthetic.toFixed(1)}`

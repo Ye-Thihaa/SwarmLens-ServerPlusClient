@@ -1,7 +1,149 @@
-# SwarmLens — three-node gossip backend
+# SwarmLens
 
-Three identical FastAPI nodes, each owning its own SQLite file. No shared
-database. State converges by gossip, not by a central authority.
+A live-event photo system that runs on three independent servers with **no
+shared database, no coordinator, and no privileged node.** Guests shoot on
+their phones, the frames and likes reach whichever server answers first, and
+the three servers reconcile with each other until they agree.
+
+Built for **CST-8114 Distributed Programming** by Group 10 (SE + KE). The
+photography is real, but it is the subject matter; the actual work is the
+replication, consensus and failure handling underneath it.
+
+## What problem this solves
+
+A normal web app puts every write in one database. Consistency is free, and
+failure is fatal — when that database goes, the product goes with it. That is
+fine for a website. It is a bad fit for a wedding hall or a festival, where
+the Wi-Fi drops, phones wander out of range, and nobody gets to stop the
+event while a server comes back.
+
+SwarmLens makes the opposite trade. Three nodes each own a private SQLite
+file and never write to each other's. Any node accepts any write at any time.
+Nothing has to be reachable for the system to keep taking photos — not even
+the network, since the phone queues locally and syncs later.
+
+The cost of that trade is that the three nodes are *allowed to disagree*, and
+everything in this repository exists to make that disagreement temporary,
+bounded and visible.
+
+## How it works
+
+Nothing in this system is stored as current state. Every write is appended to
+a local, ordered log as an immutable event:
+
+    photo · like · public_mark · aesthetic_score · event_created · recap_sent · job_claimed
+
+Every read a client makes — the photo list, like counts, zone scores, job
+status, the recap — is **derived by replaying that log**. There is no photos
+table to update, and therefore no row for two nodes to fight over.
+
+Nodes reconcile through three independent channels, each on its own timer:
+
+| Channel | Between | Carries | Cadence |
+|---|---|---|---|
+| Gossip (anti-entropy) | node ⇄ node | version-vector digest, then only the events the peer lacks | every 1s, one random peer |
+| Raft RPC | leader → followers | heartbeats and vote requests | 50ms heartbeat, 150–300ms election timeout |
+| Blob sync | node ← peer | photo bytes, keyed by sha256 | every 2s, ≤8MB per round |
+
+A write therefore travels like this:
+
+    phone ──▶ whichever node answered its health check first
+                │
+                ├─▶ event appended locally (a few hundred bytes)
+                │        └─▶ gossiped to the other two in ~1 second
+                │
+                └─▶ image bytes stored as a content-addressed blob
+                         └─▶ pulled by peers on their own byte budget
+
+Metadata and bytes replicate on **separate paths at different speeds** on
+purpose. Photo bytes originally rode the event log, and a node that fell
+behind could never catch up — every batch large enough to close the gap
+exceeded the client timeout. The measurements behind that split are in
+`blob_sync.py`.
+
+## The distributed systems parts
+
+| Concept | Where it lives | How we prove it |
+|---|---|---|
+| Replication, eventual consistency | `gossip.py` | a photo taken on one node reaches all three in ~1s |
+| Conflict-free merge (CRDT) | likes are a set union of `(guest, photo)` | likes cast during a partition all survive the heal |
+| Causality | vector clocks in `store.py`, `concurrent_with` on `GET /photos` | independent devices report as concurrent; a dominating clock never does |
+| Consensus | `raft.py` — terms, votes, heartbeats (election only) | `kill -9` the leader → re-election in 0.19–0.85s |
+| Exactly-once | recap gated on leadership + idempotence checked against the log | trigger broadcast to all three → exactly one recap |
+| Partitioning | `hashing.py` — 100 virtual nodes per member | adding a 4th node remaps ~23% of zones, not all of them |
+| Quorum / CAP | `GET /zones/quorum?R=` | R=1 stale 9/30 under partition; R=2 fresh 20/20 |
+| Failure detection | per-peer reachability in `GET /health` | the console reacts within one 1s poll |
+| Leases | `worker.py` — 8s, heartbeat-renewed | kill the claimant mid-job → another node reclaims it |
+| Partition tolerance at the edge | offline outbox in the guest app | airplane mode still shoots; the queue drains on reconnect |
+
+Raft here is **leader election only.** The log is replicated by gossip
+instead; the election exists for the one thing gossip cannot provide — a
+single node entitled to perform an action exactly once.
+
+## What you can actually run
+
+- **Guest app** (`client-2/`) — real camera, offline outbox, live AI
+  composition guidance before the shutter, gallery, likes, public wall, and
+  an end-of-event recap slideshow. Guests join by scanning a QR code.
+- **Operator console** (`client-2/`, `/console`) — live Raft term and role, a
+  node graph, hosted-event administration, quorum reads, a split-brain panel
+  showing two replicas disagreeing in real time, and chaos controls that cut
+  gossip on purpose. Password-gated server-side.
+- **Reference PWA** (`client/`) — the Phase 5 client: Dexie outbox,
+  localStorage vector clock, a real Background Sync service worker.
+- **Dashboard** (`GET /dashboard`) — dependency-free chaos and metrics page.
+
+## Repository map
+
+| File | What it does |
+|---|---|
+| `main.py` | every HTTP endpoint; the same file runs as all three nodes, behaviour set by env vars |
+| `store.py` | SQLite append-only event log; all state derived by replaying it |
+| `gossip.py` | anti-entropy loop — digest exchange, then pull/push the difference |
+| `raft.py` | leader election (no log replication) |
+| `hashing.py` | consistent-hash ring over the currently-alive cluster |
+| `worker.py` | job leases, heartbeat-renewed, reclaimable |
+| `blob_sync.py` | out-of-band replication of photo bytes |
+| `blob_archive.py`, `cloud_sync.py` | leader-gated one-way archive to object storage / Postgres |
+| `ai_engine.py` | pretrained-only analysis: face detection, saliency, CLIP film stock, aesthetic score |
+| `load_test.py` | measurement — latency, convergence, recovery, election, throughput |
+| `demo_preflight.py` | pre-demo environment check (read-only, safe against a live cluster) |
+| `test_*.py` | the automated proofs listed in the table above |
+
+## How we know it works
+
+Every test starts a real three-node cluster and tears it down again —
+nothing is mocked:
+
+    python test_raft.py        # kill the leader, assert re-election + one recap
+    python test_quorum.py      # partition a node, assert R=1 stale / R=2 fresh
+    python test_vclock.py      # concurrency is real, not invented
+    python test_events.py      # two events sharing a zone name never mix
+    python test_recap.py       # later likes cannot reorder a frozen reel
+    python test_blobs.py       # bytes stay out of the log and still replicate
+    python test_hashing.py     # ring is deterministic; a 4th node remaps ~1/N
+
+Measured on one machine with `load_test.py`:
+
+| Metric | Value |
+|---|---|
+| Convergence after a 200-upload burst | 1.89s |
+| Leader re-election, 20 trials | 0.19s min / 0.29s mean / 0.85s max |
+| Recovery: kill → lease expiry → reclaim → done | 13.25s |
+| Throughput at N = 1 / 2 / 3 / 4 | 81 / 132 / 164 / 220 uploads/sec |
+| Gossip `/sync` payload | 112KB cold, 509B steady state |
+
+Throughput scales with node count because each node is another independent
+SQLite writer — which is also the reason a single node's latency degrades
+under a burst.
+
+## Further reading
+
+- [ROADMAP.md](ROADMAP.md) — the full design and a phase-by-phase build log,
+  including what was deliberately *not* built and why
+- [CLAUDE.md](CLAUDE.md) — working notes and every gotcha hit so far, written
+  so they are not hit twice
+- [PROGRESS.md](PROGRESS.md) — status summary and measured results
 
 ## Run
 

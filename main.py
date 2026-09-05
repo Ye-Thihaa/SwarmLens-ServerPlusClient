@@ -185,21 +185,88 @@ async def _zone_scores_local(event_id: str | None = None) -> dict[str, dict]:
     aesthetic = await store.aesthetic_scores()
     zones: dict[str, dict] = {}
     scored: dict[str, list] = {}
+    shooters: dict[str, dict] = {}
     for p in await store.photos(event_id):
         z = zones.setdefault(p["zone"], {"zone": p["zone"], "photos": 0, "likes": 0})
         z["photos"] += 1
         z["likes"] += p["likes"]
+        tally = shooters.setdefault(p["zone"], {})
+        tally[p["guest_id"]] = tally.get(p["guest_id"], 0) + 1
         s = aesthetic.get(p["photo_id"])
         if s is not None:
             scored.setdefault(p["zone"], []).append(s)
     for zone, z in zones.items():
         vals = scored.get(zone)
         z["avg_aesthetic"] = round(sum(vals) / len(vals), 2) if vals else None
+        _finish_popularity(z, shooters.get(zone, {}))
     return zones
 
 
+# "How many *people* shot here", not "how many frames were shot here".
+# `guests` is the size of a set union over the photo events' own guest_id,
+# which is the same CRDT shape as likes and merges the same way: two nodes
+# that each saw a different guest during a partition converge on both, and
+# a re-delivered event (gossip's normal behaviour) adds nothing the second
+# time. A counter column could do neither -- merging 1 and 1 can't recover
+# 2 without double-counting every retry.
+POPULAR_GUEST_WEIGHT = 3
+POPULAR_LIKE_WEIGHT = 2
+# How many frames of one guest's burst still count toward the room thinking
+# a spot is busy. Without a cap the frame term is unbounded and entirely
+# attributable to one person, so a single enthusiast outranks an actual
+# crowd: measured at 3 people with a frame each (score 12) losing to 1
+# person with ten (13). That is precisely the claim this feature makes and
+# precisely the claim that would then be false. Capping per guest keeps the
+# busy-zone signal -- three people shooting ten frames each still outscores
+# three people shooting one -- while denying any one of them the ability to
+# manufacture a crowd alone.
+POPULAR_FRAMES_PER_GUEST = 3
+
+
+def _finish_popularity(z: dict, guest_frames: dict) -> None:
+    """Attach `guests` + `popular_score` to a zone row already carrying
+    `photos` and `likes`, given that zone's {guest_id: frames} tally.
+    Called by both derivations below so the two can't drift apart --
+    /zones and /zones/quorum answering different numbers for the same zone
+    would be indistinguishable from a real replication bug.
+
+    Still a pure function of the event set: the cap is applied to per-guest
+    counts derived from the merged events, so merging first and scoring
+    second gives the same answer as scoring per node. That is what keeps
+    two converged replicas in agreement.
+
+    Deliberately excludes avg_aesthetic: popular and good-looking are
+    different claims (a plain corner everyone crowds into is genuinely
+    popular), and mixing them produces a number nobody can explain.
+
+    Deliberately has no time decay either. Without it the score depends
+    only on which events exist, so any two converged replicas compute the
+    same value -- the property this whole system exists to demonstrate.
+    Decay would make it depend on each node's own wall clock, so two nodes
+    holding identical logs would disagree. If "popular right now" is ever
+    wanted, add it as a separate field and leave this one alone."""
+    z["guests"] = len(guest_frames)
+    counted_frames = sum(min(n, POPULAR_FRAMES_PER_GUEST) for n in guest_frames.values())
+    z["popular_score"] = (
+        z["guests"] * POPULAR_GUEST_WEIGHT + z["likes"] * POPULAR_LIKE_WEIGHT + counted_frames
+    )
+
+
 def _rank(zones) -> list[dict]:
-    return sorted(zones, key=lambda z: -(z["likes"] * 2 + z["photos"]))
+    # Ranked by the same number the clients display, so the ordering and the
+    # badge can never contradict each other. Zone name breaks ties, so a
+    # scoreboard of equal scores is stable rather than dependent on dict
+    # ordering (which differs between the local and merged derivations).
+    #
+    # The .get fallback is for one real case, not defensiveness: /zones
+    # proxies each zone to its ring owner, so a row here can come from a
+    # peer still running an older build during a restart. Reading the old
+    # formula off that row keeps the endpoint answering instead of 500ing
+    # on a KeyError while the cluster is mid-upgrade.
+    def score(z):
+        return z.get("popular_score", z["likes"] * 2 + z["photos"])
+
+    return sorted(zones, key=lambda z: (-score(z), z["zone"]))
 
 
 def _zone_scores_from_events(events, event_id: str | None = None) -> dict[str, dict]:
@@ -216,6 +283,7 @@ def _zone_scores_from_events(events, event_id: str | None = None) -> dict[str, d
     tombstones for photos outside this event are simply never looked
     up."""
     photo_zone: dict[str, str] = {}
+    photo_guest: dict[str, str] = {}
     like_guests: dict[str, set] = {}
     aesthetic: dict[str, float] = {}
     deleted: set[str] = set()
@@ -225,6 +293,7 @@ def _zone_scores_from_events(events, event_id: str | None = None) -> dict[str, d
             if event_id is not None and p.get("event_id", DEFAULT_EVENT_ID) != event_id:
                 continue
             photo_zone[p["photo_id"]] = p["zone"]
+            photo_guest[p["photo_id"]] = p["guest_id"]
         elif e["kind"] == "like":
             like_guests.setdefault(p["photo_id"], set()).add(p["guest_id"])
         elif e["kind"] == "aesthetic_score":
@@ -234,17 +303,23 @@ def _zone_scores_from_events(events, event_id: str | None = None) -> dict[str, d
 
     zones: dict[str, dict] = {}
     scored: dict[str, list] = {}
+    shooters: dict[str, dict] = {}
     for photo_id, zone in photo_zone.items():
         if photo_id in deleted:
             continue
         z = zones.setdefault(zone, {"zone": zone, "photos": 0, "likes": 0})
         z["photos"] += 1
         z["likes"] += len(like_guests.get(photo_id, ()))
+        # After the tombstone check, so a guest whose only frame here was
+        # retracted stops counting toward this zone being popular.
+        tally = shooters.setdefault(zone, {})
+        tally[photo_guest[photo_id]] = tally.get(photo_guest[photo_id], 0) + 1
         if photo_id in aesthetic:
             scored.setdefault(zone, []).append(aesthetic[photo_id])
     for zone, z in zones.items():
         vals = scored.get(zone)
         z["avg_aesthetic"] = round(sum(vals) / len(vals), 2) if vals else None
+        _finish_popularity(z, shooters.get(zone, {}))
     return zones
 
 

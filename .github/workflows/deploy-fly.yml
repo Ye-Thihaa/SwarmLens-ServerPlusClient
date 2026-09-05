@@ -1,0 +1,111 @@
+# Deploys the three nodes to Fly.io, one at a time.
+#
+# Manual only, deliberately. Every other workflow here is safe to fire on a
+# push; this one changes something people can reach, and a cluster is not a
+# stateless web service -- each node owns a volume holding its replica of the
+# event log. Deploying is a decision, so it is a button.
+#
+# ROLLING, NOT PARALLEL. The three apps are deployed in sequence and the run
+# stops at the first failure. Two nodes stay up while the third restarts, so
+# gossip keeps converging and raft keeps a leader among the survivors; a
+# simultaneous deploy would take the whole cluster down at once and, worse,
+# would do it *after* a bad image had already been rolled out to all three.
+# Sequential means a broken image is caught on node1 with node2 and node3
+# still serving.
+#
+# The image itself comes from docker-publish.yml, which tags every build with
+# its commit SHA precisely so a deploy can be pinned to one and rolled back
+# to one -- that is what the `image` input below is for. Left empty, each
+# app deploys whatever tag its own fly/nodeN.toml pins.
+name: Deploy to Fly.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Image to deploy (blank = the tag pinned in fly/nodeN.toml). Use a ghcr.io ...@sha256/:sha- ref to roll back."
+        type: string
+        required: false
+      nodes:
+        description: "Which nodes to deploy"
+        type: choice
+        options: ["all", "node1", "node2", "node3"]
+        default: "all"
+
+concurrency:
+  # Two overlapping deploys would restart nodes in an interleaved order and
+  # could leave the cluster with no node holding a complete, current image.
+  # Never cancel one mid-flight -- queue behind it.
+  group: deploy-fly
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fails with a sentence rather than flyctl's auth error, which reads
+      # like a network problem.
+      - name: Check the deploy token is configured
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::error::FLY_API_TOKEN is not set. Create one with 'fly tokens create deploy'" \
+                 "and add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy nodes in sequence
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          IMAGE: ${{ inputs.image }}
+          ONLY: ${{ inputs.nodes }}
+        run: |
+          set -e
+          for n in node1 node2 node3; do
+            if [ "$ONLY" != "all" ] && [ "$ONLY" != "$n" ]; then continue; fi
+            echo "::group::deploying $n"
+            if [ -n "$IMAGE" ]; then
+              fly deploy -c "fly/$n.toml" --app "swarmlens-$n" --image "$IMAGE"
+            else
+              fly deploy -c "fly/$n.toml" --app "swarmlens-$n"
+            fi
+            echo "::endgroup::"
+          done
+
+      # A green deploy only means the machine started. This asks the cluster
+      # the one question that matters afterward: did the three of them agree
+      # on a leader again, or did the new image leave them unable to form a
+      # cluster (the exact failure HOST=:: exists to prevent -- public health
+      # checks pass while every peer's RPC is refused).
+      - name: Confirm the cluster re-formed
+        if: inputs.nodes == 'all'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -e
+          for i in $(seq 1 20); do
+            leaders=$(for n in node1 node2 node3; do
+              curl -fsS --max-time 10 "https://swarmlens-$n.fly.dev/health" \
+                | python -c "import json,sys; print(json.load(sys.stdin)['raft']['leader_id'])" \
+                2>/dev/null || echo "unreachable"
+            done | sort -u | tr '\n' ' ')
+            echo "attempt $i: $leaders"
+            case "$leaders" in
+              *unreachable*|"" ) sleep 10; continue ;;
+            esac
+            if [ "$(echo $leaders | wc -w)" = "1" ]; then
+              echo "cluster agreed on leader: $leaders"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Nodes never agreed on a single leader after the deploy."
+          exit 1

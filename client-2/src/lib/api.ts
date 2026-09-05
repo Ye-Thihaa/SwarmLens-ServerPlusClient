@@ -27,6 +27,13 @@ export type ZoneScore = {
   zone: string;
   photos: number;
   likes: number;
+  /** Distinct guests who shot here — a set union server-side, so it
+   * survives a partition the way likes do. Not the same as `photos`:
+   * one guest firing off ten frames is one guest. */
+  guests: number;
+  /** guests*3 + likes*2 + photos, computed server-side. Zones arrive
+   * already sorted by it, so `zones[0]` is the popular spot. */
+  popular_score: number;
   avg_aesthetic: number | null;
   owner: string;
   stale: boolean;

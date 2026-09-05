@@ -1,0 +1,162 @@
+# Runs the test suite on every push and pull request.
+#
+# The tests here are integration tests, not unit tests: each one starts a
+# real three-node cluster on ports 8001-8003, drives it over HTTP, and
+# deletes ./node1.db..node3.db on the way out (see testutil.py). Two
+# consequences shape this whole file:
+#
+#   1. They cannot run in parallel with each other. Every script hardcodes
+#      the same ports and database paths, so two jobs on one runner would
+#      attach to each other's cluster and then delete its databases. They
+#      run sequentially, in one job, on purpose -- `fail-fast` style
+#      parallelism would be faster and wrong.
+#   2. A CI runner is the *right* place for them. testutil.ensure_safe_to_run
+#      refuses to start when those ports are busy or those .db files exist,
+#      which on a developer machine means "not while the demo cluster is up".
+#      A fresh runner has neither.
+name: CI
+
+on:
+  push:
+    branches: [master, main, recap-and-blob-storage]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_ai_tests:
+        description: "Also run the AI tests (downloads ~154MB of models)"
+        type: boolean
+        default: false
+
+concurrency:
+  # A second push to the same branch makes the first run's result irrelevant,
+  # and these jobs are minutes long. Cancel rather than queue.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.12 to match the Dockerfile, not the newest available. The pins in
+      # requirements.txt are known to resolve on this version for Linux --
+      # that is what the deployed image is built on.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Same three libraries the Dockerfile installs, for the same reason
+      # documented there: requirements.txt pins the *headless* OpenCV, but
+      # mediapipe declares a hard dependency on the GUI build, so pip
+      # installs both and the GUI one ends up providing `cv2`. It links
+      # against libGL/libglib/libxcb, and without them `import cv2` -- and
+      # therefore `import ai_engine`, and therefore the app -- fails at
+      # startup.
+      - name: Install OpenCV's shared libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libxcb1
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Guards the trap in CLAUDE.md's Gotchas: two OpenCV distributions
+      # unpack into the same cv2 directory, and `import cv2` still succeeds
+      # when the wrong one wins -- cv2.saliency simply has no detector, and
+      # /analyze/preview then 400s only for frames with no face in them.
+      # Asserting the detector *constructs* is the check that actually fails
+      # when that happens; asserting the module imports is not.
+      - name: Verify the OpenCV build actually provides saliency
+        run: |
+          python - <<'PY'
+          import cv2
+          cv2.saliency.StaticSaliencySpectralResidual_create()
+          print("cv2", cv2.__version__, "saliency OK")
+          PY
+
+      - name: Ring unit test
+        run: python test_hashing.py
+
+      # Sequential by necessity (see the header). Ordered cheapest-first so a
+      # broken build fails in seconds rather than after the slow ones.
+      #
+      # If a noisy runner ever makes the raft tests flaky, the timers are
+      # env-overridable -- RAFT_HEARTBEAT, RAFT_ELECTION_MIN/MAX,
+      # RAFT_RPC_TIMEOUT, GOSSIP_RPC_TIMEOUT -- but raise them *together*,
+      # keeping the ratios, and only here. ROADMAP.md's Phase 8 numbers were
+      # measured with the defaults and stop describing the system otherwise.
+      - name: Cluster integration tests
+        run: |
+          set -e
+          for t in test_vclock.py test_events.py test_popular.py test_recap.py \
+                   test_blobs.py test_quorum.py test_raft.py test_cloud_sync.py; do
+            echo "::group::$t"
+            python "$t"
+            echo "::endgroup::"
+          done
+
+      # ~154MB of model weights, so opt-in rather than on every push. The
+      # cache key is the engine itself: the checkpoint URLs live in its
+      # module docstring, so a change there is exactly when the cache should
+      # be considered stale.
+      - name: Cache AI models
+        if: inputs.run_ai_tests
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: models-${{ hashFiles('ai_engine.py') }}
+
+      - name: AI tests
+        if: inputs.run_ai_tests
+        run: |
+          set -e
+          python test_ai_preview.py
+          python test_ai_engine.py
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: client-2
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: client-2/package-lock.json
+
+      - run: npm ci
+
+      # `npm run lint` is deliberately NOT run here yet, and the reason is
+      # worth writing down rather than rediscovering.
+      #
+      # This repository stores CRLF line endings (verified against the raw
+      # blobs, not the working tree -- core.autocrlf=true normalises on
+      # commit, but these files predate it). eslint-plugin-prettier defaults
+      # to endOfLine "lf", so on a Linux runner every line of every file is
+      # an error: 2620 of them, all `Delete ␍`, none about the code.
+      #
+      # The fix is a `.gitattributes` with `* text=auto eol=lf` plus a
+      # `git add --renormalize .`, which is correct and also rewrites every
+      # text file in one commit -- painful to land while several people have
+      # uncommitted work. Do that deliberately, on a quiet day, then add the
+      # lint step back here.
+      #
+      # Type-checking is the part that catches real defects anyway, and it
+      # runs below.
+
+      # The build type-checks what the routes import; tsc over the whole
+      # project also covers files no route happens to reach.
+      - name: Type-check
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Build
+        run: npm run build
