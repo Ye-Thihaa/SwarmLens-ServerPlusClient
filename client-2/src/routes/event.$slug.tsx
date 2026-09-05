@@ -114,7 +114,13 @@ function EventGallery() {
   const localSrcByPhotoId = useMemo(() => {
     const m = new Map<string, string>();
     for (const o of outbox) {
-      if (o.kind === "photo" && o.photo_id)
+      // The empty check is load-bearing: a synced row has had its bytes
+      // released (outbox.ts's syncOne), and "data:image/jpeg;base64," with
+      // no payload is still a *truthy* string, so it would win the
+      // `localSrc ?? remote` race in PhotoImg below and render as a broken
+      // image -- with no way back, since onError only nulls the remote
+      // branch. Skipping the entry lets the node-served URL take over.
+      if (o.kind === "photo" && o.photo_id && o.image_base64)
         m.set(o.photo_id, `data:image/jpeg;base64,${o.image_base64}`);
     }
     return m;

@@ -5,6 +5,7 @@ import {
   CLUSTER_SIZE,
   deletePhoto,
   getPublicPhotos,
+  photoImageUrl,
   pickNode,
   prettyZone,
   PUBLIC_LIMIT_PER_GUEST,
@@ -244,7 +245,7 @@ function Mine() {
             {roll.map((p) => {
               const ackCount = p.synced && p.photo_id ? (acks[p.photo_id] ?? 0) : 0;
               const held = p.synced && ackCount === CLUSTER_SIZE;
-              const url = localBlobUrl(p);
+              const url = rollImageUrl(p, node);
               return (
                 <figure
                   key={p.local_id}
@@ -252,11 +253,25 @@ function Mine() {
                     held ? "border-converged/50" : "border-drifting/40"
                   }`}
                 >
-                  <img
-                    src={url}
-                    alt={prettyZone(p.zone)}
-                    className={`aspect-[3/4] w-full rounded-[2px] object-cover ${held ? "" : "settling"}`}
-                  />
+                  {url ? (
+                    <img
+                      src={url}
+                      alt={prettyZone(p.zone)}
+                      className={`aspect-[3/4] w-full rounded-[2px] object-cover ${held ? "" : "settling"}`}
+                    />
+                  ) : (
+                    // Synced, so its bytes were released to the cluster, but
+                    // no node is reachable to fetch them back right now. Say
+                    // that plainly rather than rendering a broken image --
+                    // the frame is safe, this device just can't see it.
+                    <div className="flex aspect-[3/4] w-full items-center justify-center rounded-[2px] border border-border px-2 text-center">
+                      <p className="font-mono text-[0.55rem] leading-relaxed tracking-widest text-stale">
+                        SAFE IN THE ROOM
+                        <br />
+                        OFFLINE RIGHT NOW
+                      </p>
+                    </div>
+                  )}
                   <figcaption className="mt-2">
                     <p className="truncate font-mono text-[0.58rem] tracking-widest text-fixer-dim">
                       {(p.photo_id ?? p.local_id.slice(0, 8)).toUpperCase()} ·{" "}
@@ -363,8 +378,12 @@ function Mine() {
   );
 }
 
-function localBlobUrl(_p: OutboxPhoto): string {
-  // image_base64 is already a data URL's payload -- decode straight from
-  // the outbox row itself, since this is always this device's own shot.
-  return `data:image/jpeg;base64,${_p.image_base64}`;
+function rollImageUrl(p: OutboxPhoto, node: string | null): string | null {
+  // Before it syncs, this device holds the only copy, so decode straight
+  // from the outbox row. After it syncs the bytes are released (see
+  // outbox.ts's syncOne) and the cluster is the copy that matters --
+  // same fallback shape as event.$slug.tsx's local-then-remote resolve.
+  if (p.image_base64) return `data:image/jpeg;base64,${p.image_base64}`;
+  if (p.photo_id && node) return photoImageUrl(node, p.photo_id);
+  return null;
 }

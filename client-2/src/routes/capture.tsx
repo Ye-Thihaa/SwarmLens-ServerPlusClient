@@ -11,7 +11,14 @@ import {
   getZones,
 } from "@/lib/api";
 import { useCurrentEvent } from "@/lib/event";
-import { buildFilterCss, DEFAULT_PRESET, STOCK_PRESETS } from "@/lib/filmStock";
+import {
+  buildFilterCss,
+  canvasFilterSupported,
+  DEFAULT_PRESET,
+  drawFiltered,
+  filterOps,
+  STOCK_PRESETS,
+} from "@/lib/filmStock";
 import { currentGuestId, tick } from "@/lib/guest";
 import { addPhoto, OutboxWriteError, photosForEvent, syncOutbox, useOutbox } from "@/lib/outbox";
 
@@ -655,9 +662,15 @@ function Capture() {
     canvas.width = exposed.width;
     canvas.height = exposed.height;
     const ctx = canvas.getContext("2d")!;
-    ctx.filter = buildFilterCss(stockKey, preset.tone, preset.color, preset.palette);
-    ctx.drawImage(exposed, 0, 0);
-    ctx.filter = "none";
+    drawFiltered(
+      ctx,
+      exposed,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+      filterOps(stockKey, preset.tone, preset.color, preset.palette),
+    );
     if (stamp) drawStamp(canvas, today);
     canvas.toBlob(
       async (blob) => {
@@ -746,7 +759,7 @@ function Capture() {
     if (!reviewing) return;
     setReviewSaveError(null);
     setSavingReview(true);
-    const filterCss = buildFilterCss(
+    const filterCss = filterOps(
       filmStocks[reviewing.stock]!.key,
       reviewing.tone,
       reviewing.color,
@@ -756,9 +769,7 @@ function Capture() {
     out.width = reviewing.canvas.width;
     out.height = reviewing.canvas.height;
     const ctx = out.getContext("2d")!;
-    ctx.filter = filterCss;
-    ctx.drawImage(reviewing.canvas, 0, 0);
-    ctx.filter = "none";
+    drawFiltered(ctx, reviewing.canvas, 0, 0, out.width, out.height, filterCss);
     if (stamp) drawStamp(out, today);
     out.toBlob(
       async (blob) => {
@@ -1581,9 +1592,18 @@ function applyExposure(
   // wide, where a flat 0-2.5px blur would be completely invisible.
   const blurPx = opts.shutterIndex * (out.width / 800);
   if (blurPx > 0) filterParts.push(`blur(${blurPx.toFixed(2)}px)`);
-  ctx.filter = filterParts.join(" ");
-  ctx.drawImage(raw, 0, 0);
-  ctx.filter = "none";
+  if (canvasFilterSupported()) {
+    ctx.filter = filterParts.join(" ");
+    ctx.drawImage(raw, 0, 0);
+    ctx.filter = "none";
+  } else {
+    // Where canvas ignores ctx.filter, exposure would silently do nothing --
+    // EV and flash are the part a guest actually sees, so those are redone
+    // in pixels. The shutter-drag blur is deliberately dropped rather than
+    // hand-rolled: a real gaussian over a multi-megapixel frame in JS costs
+    // far more than a motion-blur affectation is worth at the shutter.
+    drawFiltered(ctx, raw, 0, 0, out.width, out.height, [{ t: "brightness", v: brightness }]);
+  }
 
   const vignetteStrength = opts.isoIndex * 0.06; // index 0 (ISO 100) -> none ... index 5 (3200) -> 0.3 alpha
   if (vignetteStrength > 0) {

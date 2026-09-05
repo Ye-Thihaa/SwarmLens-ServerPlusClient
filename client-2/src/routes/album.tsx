@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { filmStocks } from "@/guest/data";
 import { BOOTH_ZONE, getPhotos, photoImageUrl, pickNode, type RemotePhoto } from "@/lib/api";
 import { useCurrentEvent } from "@/lib/event";
-import { buildFilterCss, DEFAULT_PRESET, STOCK_PRESETS } from "@/lib/filmStock";
+import { DEFAULT_PRESET, filterOps, STOCK_PRESETS, withFilter } from "@/lib/filmStock";
 import { currentGuestId, tick } from "@/lib/guest";
 import { addPhoto, photosForEvent, syncOutbox, useOutbox, type OutboxPhoto } from "@/lib/outbox";
 
@@ -276,10 +276,10 @@ async function renderStrip(
   ctx.fillRect(0, 0, canvasW, canvasH);
 
   const stockPreset = stockKey ? (STOCK_PRESETS[stockKey] ?? DEFAULT_PRESET) : null;
-  const stockFilter =
+  const stockOps =
     stockKey && stockPreset
-      ? buildFilterCss(stockKey, stockPreset.tone, stockPreset.color, stockPreset.palette)
-      : null;
+      ? filterOps(stockKey, stockPreset.tone, stockPreset.color, stockPreset.palette)
+      : [];
 
   layout.cells.forEach((cell, i) => {
     const x = pad + cell.x * photoAreaW + gap / 2;
@@ -300,10 +300,10 @@ async function renderStrip(
     const sh = h / scale;
     const sx = (img.width - sw) / 2;
     const sy = (img.height - sh) / 2;
-    ctx.filter = stockFilter ?? "none";
-    ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h);
+    withFilter(ctx, stockOps, { x, y, w, h }, () =>
+      ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h),
+    );
   });
-  ctx.filter = "none";
 
   ctx.fillStyle = frameText;
   ctx.textAlign = "center";
@@ -416,10 +416,20 @@ function Album() {
 
   const pickable: PickablePhoto[] = useMemo(() => {
     if (source === "mine") {
-      return myRoll.map((p) => ({
-        id: p.local_id,
-        src: `data:image/jpeg;base64,${p.image_base64}`,
-      }));
+      // Once a frame syncs its bytes are released to the cluster (see
+      // outbox.ts's syncOne), so fall back to the node-served copy. An
+      // empty base64 payload is a truthy string and renders as a broken
+      // tile, so it must never be handed on as a src.
+      return myRoll
+        .map((p) => ({
+          id: p.local_id,
+          src: p.image_base64
+            ? `data:image/jpeg;base64,${p.image_base64}`
+            : p.photo_id && node
+              ? photoImageUrl(node, p.photo_id)
+              : null,
+        }))
+        .filter((p): p is PickablePhoto => p.src !== null);
     }
     if (!node) return [];
     return roomPhotos.map((p) => ({

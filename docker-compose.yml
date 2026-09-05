@@ -9,9 +9,14 @@
 # excludes it (~154MB of pretrained weights), so without this mount each
 # of the three containers would download its own copy on the first
 # /analyze call. Mounting shares one set and makes a cold start instant.
+#
+# All three declare the SAME `image:` name, so compose builds it once and
+# reuses it rather than producing three byte-identical 1.5GB images. It is
+# also what the nodes are meant to be: one image, three configurations.
 services:
   node1:
     build: .
+    image: swarmlens-node:local
     environment:
       NODE_ID: node1
       DB_PATH: /data/node1.db
@@ -23,6 +28,7 @@ services:
 
   node2:
     build: .
+    image: swarmlens-node:local
     environment:
       NODE_ID: node2
       DB_PATH: /data/node2.db
@@ -34,6 +40,7 @@ services:
 
   node3:
     build: .
+    image: swarmlens-node:local
     environment:
       NODE_ID: node3
       DB_PATH: /data/node3.db

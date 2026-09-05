@@ -1,0 +1,86 @@
+# Fly.io config for SwarmLens node1. One app per node, not one app with three
+# machines: each node needs its own volume and its own stable address, and
+# `<app>.internal` gives exactly that.
+#
+# THREE THINGS THAT DIFFER FROM THE RENDER SETUP, ALL LOAD-BEARING.
+#
+# 1. HOST=:: -- Fly's private network between machines (6PN) is IPv6-only.
+#    Bound to 0.0.0.0 the process listens on IPv4 only, so its PUBLIC health
+#    check passes while every peer's gossip and raft RPC is refused. That
+#    presents as three healthy nodes that never form a cluster, which is a
+#    genuinely confusing failure. On Linux a dual-stack :: socket accepts
+#    IPv4 too, so nothing else loses by it.
+#
+# 2. Peers are addressed over the PRIVATE network (`.internal`), not the
+#    public `.fly.dev` hostname. Public addressing would push every raft
+#    heartbeat out through the edge proxy and back -- paying TLS and
+#    internet latency for traffic that never needed to leave the region.
+#    SELF_URL must match how peers address this node (it is the
+#    consistent-hash ring identity), so it is the internal name too.
+#
+# 3. Raft timers are only modestly relaxed, unlike Render's. Same-region 6PN
+#    is ~1ms, so the LAN defaults nearly hold; these give roughly 3x headroom
+#    for jitter and ~1s failover, against the 3-6s Render's public-HTTPS
+#    hops force. This is the concrete reason Fly suits this app better.
+#
+# Deploy (see README's "Deploying to Fly.io"):
+#   fly apps create swarmlens-node1
+#   fly volumes create data --size 1 --app swarmlens-node1 --region <region>
+#   fly deploy -c fly/node1.toml --app swarmlens-node1
+#
+# Keep every node in ONE region. Spread across regions and the private
+# network is no longer ~1ms, and these timers stop holding.
+
+app = "swarmlens-node1"
+primary_region = "sin"
+
+[build]
+  image = "ghcr.io/ye-thihaa/swarmlens-serverplusclient:recap-and-blob-storage"
+
+[env]
+  NODE_ID = "node1"
+  DB_PATH = "/data/node1.db"
+  PORT = "8000"
+  HOST = "::"
+  SELF_URL = "http://swarmlens-node1.internal:8000"
+  PEERS = "http://swarmlens-node2.internal:8000,http://swarmlens-node3.internal:8000"
+  GOSSIP_INTERVAL = "1.0"
+  GOSSIP_RPC_TIMEOUT = "5.0"
+  RAFT_HEARTBEAT = "0.1"
+  RAFT_ELECTION_MIN = "0.5"
+  RAFT_ELECTION_MAX = "1.0"
+  RAFT_RPC_TIMEOUT = "0.1"
+  BLOB_SYNC_INTERVAL = "2.0"
+  BLOB_RPC_TIMEOUT = "20.0"
+  SUPABASE_BUCKET = "recap-photos"
+
+# Secrets (never in this file -- `fly secrets set` stores them encrypted):
+#   fly secrets set OPERATOR_TOKEN=... --app swarmlens-node1
+#   fly secrets set SUPABASE_URL=... SUPABASE_KEY=... --app swarmlens-node1
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # A node that sleeps is a partitioned node: gossip stalls and raft
+  # re-elects around it every time it drops. Keep one machine always on.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # onnxruntime + mediapipe + opencv need real headroom; 256mb OOMs on the
+  # first /analyze call, which looks like a crash loop rather than a memory
+  # limit.
+  memory = "1gb"

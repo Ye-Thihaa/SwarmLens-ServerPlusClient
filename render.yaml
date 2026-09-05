@@ -24,6 +24,19 @@
 #    with the placeholders, then edit all three services' env and redeploy.
 #    Replace <n1>/<n2>/<n3> with the real onrender.com hostnames.
 #
+# 3. ALL THREE PULL ONE PREBUILT IMAGE, they don't each build the Dockerfile.
+#    Published by .github/workflows/docker-publish.yml on every push. Beyond
+#    saving three redundant builds, this makes a version skew between nodes
+#    impossible -- and a node running different code from its peers presents
+#    as a distributed-systems fault, which is the expensive kind to chase.
+#
+#    The tag is the BRANCH, not `latest`: the workflow only publishes
+#    `latest` from the default branch, so a `:latest` here would not resolve
+#    while the work lives on a feature branch. After merging to master,
+#    switch to `:latest`, or pin `:sha-<commit>` for a deploy you can roll
+#    back to exactly. Render redeploys are manual by default, so a moving
+#    branch tag will not surprise you mid-event.
+#
 # Persistence: each node gets its own disk. SQLite holds the event log AND
 # photo blobs, and Render's filesystem is otherwise ephemeral -- without a
 # disk, every deploy wipes the event log. Note the cluster is partly
@@ -34,8 +47,9 @@
 services:
   - type: web
     name: swarmlens-node1
-    runtime: docker
-    dockerfilePath: ./Dockerfile
+    runtime: image
+    image:
+      url: ghcr.io/ye-thihaa/swarmlens-serverplusclient:recap-and-blob-storage
     plan: starter          # free instances sleep on idle, which kills gossip/raft
     healthCheckPath: /health
     disk:
@@ -84,8 +98,9 @@ services:
 
   - type: web
     name: swarmlens-node2
-    runtime: docker
-    dockerfilePath: ./Dockerfile
+    runtime: image
+    image:
+      url: ghcr.io/ye-thihaa/swarmlens-serverplusclient:recap-and-blob-storage
     plan: starter
     healthCheckPath: /health
     disk:
@@ -130,8 +145,9 @@ services:
 
   - type: web
     name: swarmlens-node3
-    runtime: docker
-    dockerfilePath: ./Dockerfile
+    runtime: image
+    image:
+      url: ghcr.io/ye-thihaa/swarmlens-serverplusclient:recap-and-blob-storage
     plan: starter
     healthCheckPath: /health
     disk:

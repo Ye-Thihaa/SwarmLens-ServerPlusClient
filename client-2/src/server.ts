@@ -57,10 +57,40 @@ async function getServerEntry(): Promise<ServerEntry> {
   return serverEntryPromise;
 }
 
+// A client that hangs up mid-request is not a server error, and this app
+// hangs up constantly and on purpose: pickNode() races /health against all
+// three nodes with Promise.any, so two of every three are abandoned by
+// design, and the capture route's AI preview loop aborts its in-flight
+// request on every cleanup (~1.5s). With VITE_NODE_URLS=/n1,/n2,/n3 all of
+// that runs through this dev server's proxy, so each abort closes an HTTP/2
+// stream underneath us and srvx surfaces it here as an AbortError. Logging
+// those as 500s buries real errors under noise nobody can act on -- the
+// client is already gone and will never read the response we render. 499 is
+// nginx's non-standard "Client Closed Request": nothing consumes it, it just
+// keeps the status honest anywhere requests are tallied.
+function isClientDisconnect(error: unknown, request: Request): boolean {
+  if (request.signal.aborted) return true;
+  // Walk the cause chain -- the abort arrives wrapped (the observed log read
+  // "AbortError: ... caused by: AbortError"). Depth-capped: a cause chain is
+  // attacker-adjacent input in the sense that nothing guarantees it's acyclic.
+  let cursor: unknown = error;
+  for (let depth = 0; cursor != null && depth < 10; depth += 1) {
+    if (typeof cursor === "object" && (cursor as { name?: unknown }).name === "AbortError") {
+      return true;
+    }
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 // h3 swallows in-handler throws into a normal 500 Response with body
 // {"unhandled":true,"message":"HTTPError"} — try/catch alone never fires for those.
-async function normalizeCatastrophicSsrResponse(response: Response): Promise<Response> {
+async function normalizeCatastrophicSsrResponse(
+  response: Response,
+  request: Request,
+): Promise<Response> {
   if (response.status < 500) return response;
+  if (request.signal.aborted) return response;
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) return response;
 
@@ -88,8 +118,9 @@ export default {
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
-      return await normalizeCatastrophicSsrResponse(response);
+      return await normalizeCatastrophicSsrResponse(response, request);
     } catch (error) {
+      if (isClientDisconnect(error, request)) return new Response(null, { status: 499 });
       console.error(error);
       return new Response(renderErrorPage(), {
         status: 500,

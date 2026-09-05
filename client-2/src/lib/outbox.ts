@@ -142,7 +142,18 @@ export function photosForEvent(items: OutboxItem[], eventId: string): OutboxPhot
 
 export function addPhoto(item: Omit<OutboxPhoto, "kind" | "synced" | "created_at">): OutboxPhoto {
   const full: OutboxPhoto = { ...item, kind: "photo", synced: false, created_at: Date.now() };
-  writeAll([full, ...readAll()]);
+  try {
+    writeAll([full, ...readAll()]);
+  } catch (e) {
+    // A full quota is usually just bytes we no longer need -- reclaim
+    // them and try once more before telling a guest their roll is full,
+    // since "delete a photo" is a bad thing to demand when nothing the
+    // guest can see is actually taking up the space.
+    if (!(e instanceof OutboxWriteError && e.quotaExceeded) || releaseSyncedPhotoBytes() === 0) {
+      throw e;
+    }
+    writeAll([full, ...readAll()]);
+  }
   notify();
   return full;
 }
@@ -174,11 +185,38 @@ function patch(local_id: string, changes: Partial<OutboxItem>) {
   notify();
 }
 
+/** Releases the base64 of rows that synced before this device learned to
+ * drop it. Without this the fix above only helps guests whose roll is not
+ * already full -- everyone else stays wedged, because a full quota blocks
+ * the very writes that would clear it, and the only escape is clearing
+ * site data. Returns how many rows it freed. Safe to call on every pass:
+ * it writes only when it actually found something. */
+export function releaseSyncedPhotoBytes(): number {
+  const items = readAll();
+  let freed = 0;
+  const next = items.map((it) => {
+    if (it.kind === "photo" && it.synced && it.photo_id && it.image_base64) {
+      freed++;
+      return { ...it, image_base64: "" };
+    }
+    return it;
+  });
+  if (freed === 0) return 0;
+  try {
+    writeAll(next);
+  } catch {
+    return 0; // shrinking should never fail, but never let cleanup throw
+  }
+  notify();
+  return freed;
+}
+
 /** Drains every unsynced outbox row against whichever node answers
  * fastest. Never throws -- an unreachable cluster is a routine, expected
  * state here, not an error. Same shape as client/src/sync.ts's
  * syncOutbox in the Phase 5 reference client. */
 export async function syncOutbox(): Promise<{ attempted: number; synced: number }> {
+  releaseSyncedPhotoBytes();
   const pending = readAll().filter((it) => !it.synced);
   let synced = 0;
   for (const item of pending) {
@@ -200,7 +238,19 @@ async function syncOne(item: OutboxItem): Promise<boolean> {
         image_base64: item.image_base64,
         event_id: item.event_id ?? DEFAULT_EVENT_ID,
       });
-      patch(item.local_id, { synced: true, photo_id: res.photo_id });
+      // Drop the bytes at the same moment they stop being this device's
+      // only copy. The cluster now holds them as a blob, replicated to
+      // all three nodes and served back by GET /photos/{id}/image, so
+      // keeping the base64 here buys nothing and costs the whole roll:
+      // at ~200KB a frame against localStorage's ~5MB origin quota, a
+      // guest hit "your roll is full" after roughly twenty shots and
+      // never recovered, because nothing ever released a synced row.
+      // Worse, the wall was invisible -- My roll filters to the joined
+      // event (photosForEvent), so a fresh event read "0 frames tonight"
+      // while the quota was still full of a previous event's photos.
+      // postAnalyze below still sends the bytes: it closes over `item`,
+      // the in-memory row, not what's left in storage.
+      patch(item.local_id, { synced: true, photo_id: res.photo_id, image_base64: "" });
       // Fire-and-forget: populates a real aesthetic_score for this photo
       // (see api.ts's postAnalyze docstring). Never blocks the outbox --
       // a cold model download shouldn't stall every other queued item.
