@@ -617,7 +617,15 @@ function Console() {
                 [
                   ["Guests shooting", String(guests), "text-fixer"],
                   ["Frames landed", frames.toLocaleString(), "text-fixer"],
-                  ["Leading spot", topZone ? prettyZone(topZone.zone) : "—", "text-drifting"],
+                  [
+                    "Popular spot",
+                    topZone
+                      ? `${prettyZone(topZone.zone)} · ${topZone.guests} ${
+                          topZone.guests === 1 ? "person" : "people"
+                        }`
+                      : "—",
+                    "text-drifting",
+                  ],
                   [
                     "Last quorum read",
                     quorum
@@ -676,12 +684,21 @@ function Console() {
                       key={z.zone}
                       className="grid grid-cols-[minmax(6rem,9rem)_1fr_3rem] items-center gap-4"
                     >
-                      <span className="truncate text-sm capitalize">{prettyZone(z.zone)}</span>
+                      <span className="truncate text-sm capitalize">
+                        {prettyZone(z.zone)}
+                        <span className="ml-2 font-mono text-[0.6rem] tracking-widest text-stale">
+                          {z.guests}P
+                        </span>
+                      </span>
                       <span className="h-px bg-border">
                         <span
                           className="block h-px"
                           style={{
-                            width: `${Math.min(100, (z.likes * 2 + z.photos) * 8)}%`,
+                            // Scaled off popular_score, the same number the
+                            // list is already sorted by -- a second formula
+                            // here would eventually draw the bars in an order
+                            // the rows contradict.
+                            width: `${Math.min(100, z.popular_score * 6)}%`,
                             background: z.stale ? "var(--safelight)" : "var(--converged)",
                             boxShadow: "0 0 0 1px currentColor",
                           }}
